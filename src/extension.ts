@@ -408,24 +408,30 @@ export function activate(context: vscode.ExtensionContext) {
                 const leftUri = tempDir.with({ path: `/${hash}^/${selectedFile.file}` });
                 const rightUri = tempDir.with({ path: `/${hash}/${selectedFile.file}` });
 
-                // Get the file content before and after the commit
-                const { stdout: leftContent } = await execAsync(
-                    `git show ${hash}^:${selectedFile.file}`,
-                    { cwd: workspaceRoot }
-                );
-                const { stdout: rightContent } = await execAsync(
-                    `git show ${hash}:${selectedFile.file}`,
-                    { cwd: workspaceRoot }
-                );
+                try {
+                    // Get the file content before and after the commit
+                    const { stdout: leftContent } = await execAsync(
+                        `git show ${hash}^:${selectedFile.file}`,
+                        { cwd: workspaceRoot }
+                    );
+                    contentProvider.setContent(leftUri, leftContent);
+                } catch (error) {
+                    // If file didn't exist before the commit, set empty content
+                    contentProvider.setContent(leftUri, '');
+                }
 
-                // Set content in the content provider
-                contentProvider.setContent(leftUri, leftContent);
-                contentProvider.setContent(rightUri, rightContent);
+                try {
+                    const { stdout: rightContent } = await execAsync(
+                        `git show ${hash}:${selectedFile.file}`,
+                        { cwd: workspaceRoot }
+                    );
+                    contentProvider.setContent(rightUri, rightContent);
+                } catch (error) {
+                    // If file doesn't exist after the commit, set empty content
+                    contentProvider.setContent(rightUri, '');
+                }
 
                 // Create a diff editor
-                const diffEditor = await vscode.workspace.openTextDocument(leftUri);
-                const rightDoc = await vscode.workspace.openTextDocument(rightUri);
-                
                 await vscode.commands.executeCommand('vscode.diff', leftUri, rightUri, `${selectedFile.file} (${hash})`);
 
             } catch (error) {
@@ -450,24 +456,31 @@ export function activate(context: vscode.ExtensionContext) {
                 const leftUri = tempDir.with({ path: `/origin/${currentBranch}/${file}` });
                 const rightUri = tempDir.with({ path: `/${currentBranch}/${file}` });
 
-                // Get the file content from origin and current branch
-                const { stdout: leftContent } = await execAsync(
-                    `git show origin/${currentBranch}:${file}`,
-                    { cwd: workspaceRoot }
-                );
-                const { stdout: rightContent } = await execAsync(
-                    `git show ${currentBranch}:${file}`,
-                    { cwd: workspaceRoot }
-                );
+                try {
+                    // Get the file content from origin
+                    const { stdout: leftContent } = await execAsync(
+                        `git show origin/${currentBranch}:${file}`,
+                        { cwd: workspaceRoot }
+                    );
+                    contentProvider.setContent(leftUri, leftContent);
+                } catch (error) {
+                    // If file doesn't exist in origin (new file), set empty content
+                    contentProvider.setContent(leftUri, '');
+                }
 
-                // Set content in the content provider
-                contentProvider.setContent(leftUri, leftContent);
-                contentProvider.setContent(rightUri, rightContent);
+                try {
+                    // Get the file content from current branch
+                    const { stdout: rightContent } = await execAsync(
+                        `git show ${currentBranch}:${file}`,
+                        { cwd: workspaceRoot }
+                    );
+                    contentProvider.setContent(rightUri, rightContent);
+                } catch (error) {
+                    // If file doesn't exist in current branch (deleted file), set empty content
+                    contentProvider.setContent(rightUri, '');
+                }
 
                 // Create a diff editor
-                const diffEditor = await vscode.workspace.openTextDocument(leftUri);
-                const rightDoc = await vscode.workspace.openTextDocument(rightUri);
-                
                 await vscode.commands.executeCommand('vscode.diff', leftUri, rightUri, `${file} (${currentBranch})`);
 
             } catch (error) {
