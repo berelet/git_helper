@@ -107,9 +107,9 @@ class GitOutgoingProvider implements vscode.TreeDataProvider<GitOutgoingItem> {
                     `${statusIcon} ${file}`,
                     vscode.TreeItemCollapsibleState.None,
                     {
-                        command: 'vscode.open',
-                        title: 'Open File',
-                        arguments: [vscode.Uri.file(`${this.workspaceRoot}/${file}`)]
+                        command: 'gitOutgoingView.showFileDiff',
+                        title: 'Show File Diff',
+                        arguments: [file, status]
                     }
                 );
             });
@@ -184,49 +184,102 @@ export function activate(context: vscode.ExtensionContext) {
                     return;
                 }
 
-                // Create a diff editor for each file
-                for (const { status, file } of files) {
-                    try {
-                        // Get the file content before the commit
-                        const { stdout: oldContent } = await execAsync(`git show ${hash}^:${file}`, { cwd: workspaceRoot });
-                        
-                        // Get the file content at the commit
-                        const { stdout: newContent } = await execAsync(`git show ${hash}:${file}`, { cwd: workspaceRoot });
+                // Create a quick pick menu for file selection
+                const fileItems = files.map(({ status, file }) => ({
+                    label: `${gitOutgoingProvider.getStatusIcon(status)} ${file}`,
+                    description: status,
+                    file: file
+                }));
 
-                        // Create temporary files for the diff
-                        const oldUri = vscode.Uri.parse(`git-outgoing://${hash}^/${file}`);
-                        const newUri = vscode.Uri.parse(`git-outgoing://${hash}/${file}`);
+                const selectedFile = await vscode.window.showQuickPick(fileItems, {
+                    placeHolder: `Select a file to view changes (${hash})`,
+                    matchOnDescription: true
+                });
 
-                        // Register content provider for the temporary files
-                        const contentProvider = new class implements vscode.TextDocumentContentProvider {
-                            async provideTextDocumentContent(uri: vscode.Uri): Promise<string> {
-                                return uri.toString().includes(`${hash}^`) ? oldContent : newContent;
-                            }
-                        };
+                if (!selectedFile) {
+                    return;
+                }
 
-                        context.subscriptions.push(
-                            vscode.workspace.registerTextDocumentContentProvider('git-outgoing', contentProvider)
-                        );
+                const { file } = selectedFile;
+                try {
+                    // Get the file content before the commit
+                    const { stdout: oldContent } = await execAsync(`git show ${hash}^:${file}`, { cwd: workspaceRoot });
+                    
+                    // Get the file content at the commit
+                    const { stdout: newContent } = await execAsync(`git show ${hash}:${file}`, { cwd: workspaceRoot });
 
-                        // Get status icon for the file
-                        const statusIcon = gitOutgoingProvider.getStatusIcon(status);
+                    // Create temporary files for the diff
+                    const oldUri = vscode.Uri.parse(`git-outgoing://${hash}^/${file}`);
+                    const newUri = vscode.Uri.parse(`git-outgoing://${hash}/${file}`);
 
-                        // Open the diff editor
-                        await vscode.commands.executeCommand('vscode.diff',
-                            oldUri,
-                            newUri,
-                            `${statusIcon} ${file} (${hash}) - ${commitMessage}`,
-                            { preview: true }
-                        );
-                    } catch (error) {
-                        console.error(`Error showing diff for file ${file}:`, error);
-                        // Continue with next file even if one fails
-                        continue;
-                    }
+                    // Register content provider for the temporary files
+                    const contentProvider = new class implements vscode.TextDocumentContentProvider {
+                        async provideTextDocumentContent(uri: vscode.Uri): Promise<string> {
+                            return uri.toString().includes(`${hash}^`) ? oldContent : newContent;
+                        }
+                    };
+
+                    context.subscriptions.push(
+                        vscode.workspace.registerTextDocumentContentProvider('git-outgoing', contentProvider)
+                    );
+
+                    // Open the diff editor
+                    await vscode.commands.executeCommand('vscode.diff',
+                        oldUri,
+                        newUri,
+                        `${selectedFile.label} (${hash}) - ${commitMessage}`,
+                        { preview: true }
+                    );
+                } catch (error) {
+                    console.error(`Error showing diff for file ${file}:`, error);
+                    vscode.window.showErrorMessage(`Failed to show diff for ${file}: ${error}`);
                 }
             } catch (error) {
                 console.error('Error showing commit diff:', error);
                 vscode.window.showErrorMessage(`Failed to show commit diff: ${error}`);
+            }
+        })
+    );
+
+    context.subscriptions.push(
+        vscode.commands.registerCommand('gitOutgoingView.showFileDiff', async (file: string, status: string) => {
+            try {
+                const currentBranch = await gitOutgoingProvider.getCurrentBranch();
+                
+                // Get the file content from the remote branch
+                const { stdout: oldContent } = await execAsync(`git show origin/${currentBranch}:${file}`, { cwd: workspaceRoot });
+                
+                // Get the file content from the current branch
+                const { stdout: newContent } = await execAsync(`git show ${currentBranch}:${file}`, { cwd: workspaceRoot });
+
+                // Create temporary files for the diff
+                const oldUri = vscode.Uri.parse(`git-outgoing://origin/${currentBranch}/${file}`);
+                const newUri = vscode.Uri.parse(`git-outgoing://${currentBranch}/${file}`);
+
+                // Register content provider for the temporary files
+                const contentProvider = new class implements vscode.TextDocumentContentProvider {
+                    async provideTextDocumentContent(uri: vscode.Uri): Promise<string> {
+                        return uri.toString().includes('origin/') ? oldContent : newContent;
+                    }
+                };
+
+                context.subscriptions.push(
+                    vscode.workspace.registerTextDocumentContentProvider('git-outgoing', contentProvider)
+                );
+
+                // Get status icon for the file
+                const statusIcon = gitOutgoingProvider.getStatusIcon(status);
+
+                // Open the diff editor
+                await vscode.commands.executeCommand('vscode.diff',
+                    oldUri,
+                    newUri,
+                    `${statusIcon} ${file} - Changes in ${currentBranch}`,
+                    { preview: true }
+                );
+            } catch (error) {
+                console.error(`Error showing diff for file ${file}:`, error);
+                vscode.window.showErrorMessage(`Failed to show diff for ${file}: ${error}`);
             }
         })
     );
