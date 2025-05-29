@@ -1,0 +1,62 @@
+{
+  "name": "git-helper",
+  "displayName": "Git Helper",
+  "description": "Adds Git Outgoing View to Source Control panel",
+  "version": "0.0.1",
+  "publisher": "berelet",
+  "repository": {
+    "type": "git",
+    "url": "git@github.com:berelet/git_helper.git"
+  },
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "onStartupFinished",
+    "onView:gitOutgoingView"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "views": {
+      "scm": [
+        {
+          "type": "tree",
+          "id": "gitOutgoingView",
+          "name": "Git Outgoing View",
+          "order": 1
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "gitOutgoingView.refresh",
+        "title": "Refresh",
+        "icon": "$(refresh)"
+      }
+    ]
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "pretest": "npm run compile && npm run lint",
+    "lint": "eslint src --ext ts",
+    "test": "node ./out/test/runTest.js"
+  },
+  "devDependencies": {
+    "@types/vscode": "^1.85.0",
+    "@types/glob": "^7.1.4",
+    "@types/mocha": "^10.0.6",
+    "@types/node": "20.x",
+    "@typescript-eslint/eslint-plugin": "^6.15.0",
+    "@typescript-eslint/parser": "^6.15.0",
+    "eslint": "^8.56.0",
+    "glob": "^7.1.7",
+    "mocha": "^10.2.0",
+    "typescript": "^5.3.3",
+    "@vscode/test-electron": "^2.3.8"
+  }
+}
