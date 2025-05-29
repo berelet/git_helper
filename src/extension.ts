@@ -14,12 +14,35 @@ class GitOutgoingItem extends vscode.TreeItem {
     }
 }
 
+class PushStateTracker {
+    private lastPushHash: string | null = null;
+
+    async updateLastPushHash(workspaceRoot: string): Promise<void> {
+        try {
+            const { stdout } = await execAsync('git rev-parse origin/HEAD', { cwd: workspaceRoot });
+            this.lastPushHash = stdout.trim();
+        } catch (error) {
+            console.error('Error getting last push hash:', error);
+            this.lastPushHash = null;
+        }
+    }
+
+    getLastPushHash(): string | null {
+        return this.lastPushHash;
+    }
+}
+
 class GitOutgoingProvider implements vscode.TreeDataProvider<GitOutgoingItem> {
     private _onDidChangeTreeData: vscode.EventEmitter<GitOutgoingItem | undefined | null | void> = new vscode.EventEmitter<GitOutgoingItem | undefined | null | void>();
     readonly onDidChangeTreeData: vscode.Event<GitOutgoingItem | undefined | null | void> = this._onDidChangeTreeData.event;
+    private pushStateTracker: PushStateTracker;
 
     constructor(private workspaceRoot: string | undefined) {
         console.log('GitOutgoingProvider initialized with workspace:', workspaceRoot);
+        this.pushStateTracker = new PushStateTracker();
+        if (workspaceRoot) {
+            this.pushStateTracker.updateLastPushHash(workspaceRoot);
+        }
     }
 
     refresh(): void {
@@ -68,8 +91,19 @@ class GitOutgoingProvider implements vscode.TreeDataProvider<GitOutgoingItem> {
         try {
             const currentBranch = await this.getCurrentBranch();
             console.log('Current branch:', currentBranch);
-            const outgoingCommits = await this.getGitOutgoingCommits(currentBranch);
-            console.log('Outgoing commits:', outgoingCommits);
+            
+            if (!this.workspaceRoot) {
+                return [];
+            }
+
+            // Get all commits since last push
+            const lastPushHash = this.pushStateTracker.getLastPushHash();
+            const command = lastPushHash 
+                ? `git log ${lastPushHash}..${currentBranch} --oneline`
+                : `git log origin/${currentBranch}..${currentBranch} --oneline`;
+
+            const { stdout } = await execAsync(command, { cwd: this.workspaceRoot });
+            const outgoingCommits = stdout.split('\n').filter(line => line.trim());
             
             return outgoingCommits.map(commit => {
                 const [hash, ...messageParts] = commit.split(' ');
@@ -130,8 +164,14 @@ class GitOutgoingProvider implements vscode.TreeDataProvider<GitOutgoingItem> {
     private async getSyncedCommits(): Promise<GitOutgoingItem[]> {
         try {
             const currentBranch = await this.getCurrentBranch();
-            // Get commits that are in both local and remote
-            const { stdout } = await execAsync(`git log origin/${currentBranch} --oneline`, { cwd: this.workspaceRoot });
+            const lastPushHash = this.pushStateTracker.getLastPushHash();
+            
+            if (!lastPushHash) {
+                return [new GitOutgoingItem('No synced commits', vscode.TreeItemCollapsibleState.None)];
+            }
+
+            // Get commits that are in both local and remote up to last push
+            const { stdout } = await execAsync(`git log ${lastPushHash} --oneline`, { cwd: this.workspaceRoot });
             const commits = stdout.split('\n').filter(line => line.trim());
             
             if (commits.length === 0) {
@@ -187,11 +227,6 @@ class GitOutgoingProvider implements vscode.TreeDataProvider<GitOutgoingItem> {
         }
     }
 
-    private async getGitOutgoingCommits(branch: string): Promise<string[]> {
-        const { stdout } = await execAsync(`git log origin/${branch}..${branch} --oneline`, { cwd: this.workspaceRoot });
-        return stdout.split('\n').filter(line => line.trim());
-    }
-
     async getCurrentBranch(): Promise<string> {
         const { stdout } = await execAsync('git rev-parse --abbrev-ref HEAD', { cwd: this.workspaceRoot });
         return stdout.trim();
@@ -207,6 +242,14 @@ class GitOutgoingProvider implements vscode.TreeDataProvider<GitOutgoingItem> {
             case 'U': return '⚠️';
             case 'T': return '📋';
             default: return '��';
+        }
+    }
+
+    // Add public method to handle push updates
+    async updateLastPush(): Promise<void> {
+        if (this.workspaceRoot) {
+            await this.pushStateTracker.updateLastPushHash(this.workspaceRoot);
+            this.refresh();
         }
     }
 }
@@ -382,7 +425,24 @@ export function activate(context: vscode.ExtensionContext) {
     context.subscriptions.push(
         gitWatcher.onDidChange(() => {
             console.log('Git repository changed');
-            gitOutgoingProvider.refresh();
+            // Check if this was a push by looking at the reflog
+            if (workspaceRoot) {
+                execAsync('git reflog -1', { cwd: workspaceRoot })
+                    .then(({ stdout }) => {
+                        if (stdout.includes('push')) {
+                            console.log('Detected git push, updating last push hash');
+                            vscode.commands.executeCommand('gitOutgoingView.updateLastPush');
+                        } else {
+                            gitOutgoingProvider.refresh();
+                        }
+                    })
+                    .catch(error => {
+                        console.error('Error checking git reflog:', error);
+                        gitOutgoingProvider.refresh();
+                    });
+            } else {
+                gitOutgoingProvider.refresh();
+            }
         }),
         gitWatcher.onDidCreate(() => {
             console.log('Git repository created');
@@ -391,6 +451,13 @@ export function activate(context: vscode.ExtensionContext) {
         gitWatcher.onDidDelete(() => {
             console.log('Git repository deleted');
             gitOutgoingProvider.refresh();
+        })
+    );
+
+    // Update the command to use the new public method
+    context.subscriptions.push(
+        vscode.commands.registerCommand('gitOutgoingView.updateLastPush', async () => {
+            await gitOutgoingProvider.updateLastPush();
         })
     );
 }
