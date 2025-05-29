@@ -19,8 +19,18 @@ class PushStateTracker {
 
     async updateLastPushHash(workspaceRoot: string): Promise<void> {
         try {
-            const { stdout } = await execAsync('git rev-parse origin/HEAD', { cwd: workspaceRoot });
+            // Get the current branch
+            const { stdout: currentBranch } = await execAsync('git rev-parse --abbrev-ref HEAD', { cwd: workspaceRoot });
+            const branch = currentBranch.trim();
+            console.log('Current branch for push tracking:', branch);
+
+            // Get the commit hash where the current branch diverged from origin
+            const { stdout } = await execAsync(
+                `git merge-base origin/${branch} ${branch}`,
+                { cwd: workspaceRoot }
+            );
             this.lastPushHash = stdout.trim();
+            console.log('Updated last push hash:', this.lastPushHash);
         } catch (error) {
             console.error('Error getting last push hash:', error);
             this.lastPushHash = null;
@@ -93,18 +103,45 @@ class GitOutgoingProvider implements vscode.TreeDataProvider<GitOutgoingItem> {
             console.log('Current branch:', currentBranch);
             
             if (!this.workspaceRoot) {
+                console.log('No workspace root found');
                 return [];
+            }
+
+            // Check if we're in a git repository
+            try {
+                await execAsync('git rev-parse --is-inside-work-tree', { cwd: this.workspaceRoot });
+            } catch (error) {
+                console.error('Not a git repository:', error);
+                return [new GitOutgoingItem('Not a git repository', vscode.TreeItemCollapsibleState.None)];
+            }
+
+            // Check if we have a remote
+            try {
+                const { stdout: remoteUrl } = await execAsync('git remote get-url origin', { cwd: this.workspaceRoot });
+                console.log('Remote URL:', remoteUrl);
+            } catch (error) {
+                console.error('No remote origin found:', error);
+                return [new GitOutgoingItem('No remote origin found', vscode.TreeItemCollapsibleState.None)];
             }
 
             // Get all commits since last push
             const lastPushHash = this.pushStateTracker.getLastPushHash();
+            console.log('Last push hash:', lastPushHash);
+
             const command = lastPushHash 
                 ? `git log ${lastPushHash}..${currentBranch} --oneline`
                 : `git log origin/${currentBranch}..${currentBranch} --oneline`;
 
+            console.log('Executing command:', command);
             const { stdout } = await execAsync(command, { cwd: this.workspaceRoot });
+            console.log('Command output:', stdout);
+
             const outgoingCommits = stdout.split('\n').filter(line => line.trim());
             
+            if (outgoingCommits.length === 0) {
+                return [new GitOutgoingItem('No outgoing commits', vscode.TreeItemCollapsibleState.None)];
+            }
+
             return outgoingCommits.map(commit => {
                 const [hash, ...messageParts] = commit.split(' ');
                 const message = messageParts.join(' ');
@@ -119,28 +156,50 @@ class GitOutgoingProvider implements vscode.TreeDataProvider<GitOutgoingItem> {
                     }
                 );
             });
-        } catch (error) {
+        } catch (error: any) {
             console.error('Error getting outgoing commits:', error);
-            return [new GitOutgoingItem('Error loading commits', vscode.TreeItemCollapsibleState.None)];
+            return [new GitOutgoingItem(`Error loading commits: ${error?.message || 'Unknown error'}`, vscode.TreeItemCollapsibleState.None)];
         }
     }
 
     private async getChangedFiles(): Promise<GitOutgoingItem[]> {
         try {
             const currentBranch = await this.getCurrentBranch();
-            const lastPushHash = this.pushStateTracker.getLastPushHash();
+            console.log('Current branch:', currentBranch);
             
             if (!this.workspaceRoot) {
+                console.log('No workspace root found');
                 return [];
             }
+
+            // Check if we're in a git repository
+            try {
+                await execAsync('git rev-parse --is-inside-work-tree', { cwd: this.workspaceRoot });
+            } catch (error) {
+                console.error('Not a git repository:', error);
+                return [new GitOutgoingItem('Not a git repository', vscode.TreeItemCollapsibleState.None)];
+            }
+
+            // Check if we have a remote
+            try {
+                const { stdout: remoteUrl } = await execAsync('git remote get-url origin', { cwd: this.workspaceRoot });
+                console.log('Remote URL:', remoteUrl);
+            } catch (error) {
+                console.error('No remote origin found:', error);
+                return [new GitOutgoingItem('No remote origin found', vscode.TreeItemCollapsibleState.None)];
+            }
+
+            const lastPushHash = this.pushStateTracker.getLastPushHash();
+            console.log('Last push hash:', lastPushHash);
 
             // Get all files changed in all outgoing commits
             const command = lastPushHash 
                 ? `git diff --name-status ${lastPushHash}..${currentBranch}`
                 : `git diff --name-status origin/${currentBranch}..${currentBranch}`;
 
+            console.log('Executing command:', command);
             const { stdout } = await execAsync(command, { cwd: this.workspaceRoot });
-            console.log('Git diff output:', stdout);
+            console.log('Command output:', stdout);
             
             if (!stdout.trim()) {
                 return [new GitOutgoingItem('No changes in outgoing commits', vscode.TreeItemCollapsibleState.None)];
@@ -165,9 +224,9 @@ class GitOutgoingProvider implements vscode.TreeDataProvider<GitOutgoingItem> {
                     }
                 );
             });
-        } catch (error) {
+        } catch (error: any) {
             console.error('Error getting changed files:', error);
-            return [new GitOutgoingItem('Error loading files', vscode.TreeItemCollapsibleState.None)];
+            return [new GitOutgoingItem(`Error loading files: ${error?.message || 'Unknown error'}`, vscode.TreeItemCollapsibleState.None)];
         }
     }
 
