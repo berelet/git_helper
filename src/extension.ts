@@ -211,23 +211,38 @@ class GitOutgoingProvider implements vscode.TreeDataProvider<GitOutgoingItem> {
     private async getSyncedFiles(): Promise<GitOutgoingItem[]> {
         try {
             const currentBranch = await this.getCurrentBranch();
-            // Get all files that are synced with remote
-            const { stdout } = await execAsync(`git ls-tree -r --name-only origin/${currentBranch}`, { cwd: this.workspaceRoot });
+            const lastPushHash = this.pushStateTracker.getLastPushHash();
+            
+            if (!lastPushHash) {
+                return [new GitOutgoingItem('No synced files', vscode.TreeItemCollapsibleState.None)];
+            }
+
+            // Get files that were changed in the last push
+            const { stdout } = await execAsync(
+                `git diff --name-status ${lastPushHash}^..${lastPushHash}`,
+                { cwd: this.workspaceRoot }
+            );
             
             if (!stdout.trim()) {
                 return [new GitOutgoingItem('No synced files', vscode.TreeItemCollapsibleState.None)];
             }
 
-            const files = stdout.split('\n').filter(line => line.trim());
+            const files = stdout.split('\n')
+                .filter(line => line.trim())
+                .map(line => {
+                    const [status, file] = line.split('\t');
+                    return { status, file };
+                });
 
-            return files.map(file => {
+            return files.map(({ status, file }) => {
+                const statusIcon = this.getStatusIcon(status);
                 return new GitOutgoingItem(
-                    `📄 ${file}`,
+                    `${statusIcon} ${file}`,
                     vscode.TreeItemCollapsibleState.None,
                     {
                         command: 'gitOutgoingView.showFileDiff',
                         title: 'Show File Diff',
-                        arguments: [file, 'M']
+                        arguments: [file, status]
                     }
                 );
             });
