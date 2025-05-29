@@ -128,8 +128,18 @@ class GitOutgoingProvider implements vscode.TreeDataProvider<GitOutgoingItem> {
     private async getChangedFiles(): Promise<GitOutgoingItem[]> {
         try {
             const currentBranch = await this.getCurrentBranch();
-            // Get all files changed in outgoing commits
-            const { stdout } = await execAsync(`git diff --name-status origin/${currentBranch}..${currentBranch}`, { cwd: this.workspaceRoot });
+            const lastPushHash = this.pushStateTracker.getLastPushHash();
+            
+            if (!this.workspaceRoot) {
+                return [];
+            }
+
+            // Get all files changed in all outgoing commits
+            const command = lastPushHash 
+                ? `git diff --name-status ${lastPushHash}..${currentBranch}`
+                : `git diff --name-status origin/${currentBranch}..${currentBranch}`;
+
+            const { stdout } = await execAsync(command, { cwd: this.workspaceRoot });
             console.log('Git diff output:', stdout);
             
             if (!stdout.trim()) {
