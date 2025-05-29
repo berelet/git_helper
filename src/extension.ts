@@ -41,7 +41,9 @@ class GitOutgoingProvider implements vscode.TreeDataProvider<GitOutgoingItem> {
             console.log('Creating root items');
             return [
                 new GitOutgoingItem('📦 Outgoing Commits', vscode.TreeItemCollapsibleState.Expanded),
-                new GitOutgoingItem('📄 Changed Files', vscode.TreeItemCollapsibleState.Expanded)
+                new GitOutgoingItem('📄 Changed Files', vscode.TreeItemCollapsibleState.Expanded),
+                new GitOutgoingItem('✅ Synced Commits', vscode.TreeItemCollapsibleState.Expanded),
+                new GitOutgoingItem('📋 Synced Files', vscode.TreeItemCollapsibleState.Expanded)
             ];
         }
 
@@ -51,6 +53,12 @@ class GitOutgoingProvider implements vscode.TreeDataProvider<GitOutgoingItem> {
         } else if (element.label === '📄 Changed Files') {
             console.log('Getting changed files');
             return this.getChangedFiles();
+        } else if (element.label === '✅ Synced Commits') {
+            console.log('Getting synced commits');
+            return this.getSyncedCommits();
+        } else if (element.label === '📋 Synced Files') {
+            console.log('Getting synced files');
+            return this.getSyncedFiles();
         }
 
         return [];
@@ -116,6 +124,66 @@ class GitOutgoingProvider implements vscode.TreeDataProvider<GitOutgoingItem> {
         } catch (error) {
             console.error('Error getting changed files:', error);
             return [new GitOutgoingItem('Error loading files', vscode.TreeItemCollapsibleState.None)];
+        }
+    }
+
+    private async getSyncedCommits(): Promise<GitOutgoingItem[]> {
+        try {
+            const currentBranch = await this.getCurrentBranch();
+            // Get commits that are in both local and remote
+            const { stdout } = await execAsync(`git log origin/${currentBranch} --oneline`, { cwd: this.workspaceRoot });
+            const commits = stdout.split('\n').filter(line => line.trim());
+            
+            if (commits.length === 0) {
+                return [new GitOutgoingItem('No synced commits', vscode.TreeItemCollapsibleState.None)];
+            }
+
+            return commits.map(commit => {
+                const [hash, ...messageParts] = commit.split(' ');
+                const message = messageParts.join(' ');
+                
+                return new GitOutgoingItem(
+                    `${message} (${hash})`,
+                    vscode.TreeItemCollapsibleState.None,
+                    {
+                        command: 'gitOutgoingView.showCommitDiff',
+                        title: 'Show Commit Diff',
+                        arguments: [hash]
+                    }
+                );
+            });
+        } catch (error) {
+            console.error('Error getting synced commits:', error);
+            return [new GitOutgoingItem('Error loading synced commits', vscode.TreeItemCollapsibleState.None)];
+        }
+    }
+
+    private async getSyncedFiles(): Promise<GitOutgoingItem[]> {
+        try {
+            const currentBranch = await this.getCurrentBranch();
+            // Get all files that are synced with remote
+            const { stdout } = await execAsync(`git ls-tree -r --name-only origin/${currentBranch}`, { cwd: this.workspaceRoot });
+            
+            if (!stdout.trim()) {
+                return [new GitOutgoingItem('No synced files', vscode.TreeItemCollapsibleState.None)];
+            }
+
+            const files = stdout.split('\n').filter(line => line.trim());
+
+            return files.map(file => {
+                return new GitOutgoingItem(
+                    `📄 ${file}`,
+                    vscode.TreeItemCollapsibleState.None,
+                    {
+                        command: 'gitOutgoingView.showFileDiff',
+                        title: 'Show File Diff',
+                        arguments: [file, 'M']
+                    }
+                );
+            });
+        } catch (error) {
+            console.error('Error getting synced files:', error);
+            return [new GitOutgoingItem('Error loading synced files', vscode.TreeItemCollapsibleState.None)];
         }
     }
 
