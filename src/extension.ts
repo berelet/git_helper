@@ -180,8 +180,11 @@ class GitOutgoingProvider implements vscode.TreeDataProvider<GitOutgoingItem> {
                 return [new GitOutgoingItem('No synced commits', vscode.TreeItemCollapsibleState.None)];
             }
 
-            // Get commits that are in both local and remote up to last push
-            const { stdout } = await execAsync(`git log ${lastPushHash} --oneline`, { cwd: this.workspaceRoot });
+            // Get only commits that were in the last push
+            const { stdout } = await execAsync(
+                `git log ${lastPushHash}^..${lastPushHash} --oneline`,
+                { cwd: this.workspaceRoot }
+            );
             const commits = stdout.split('\n').filter(line => line.trim());
             
             if (commits.length === 0) {
