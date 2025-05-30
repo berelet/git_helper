@@ -35,6 +35,25 @@
         "command": "gitOutgoingView.refresh",
         "title": "Refresh",
         "icon": "$(refresh)"
+      },
+      {
+        "command": "gitOutgoingView.showFileDiff",
+        "title": "Show File Diff",
+        "category": "Git Outgoing View"
+      },
+      {
+        "command": "gitOutgoingView.showCommitDiff",
+        "title": "Show Commit Diff",
+        "category": "Git Outgoing View"
+      },
+      {
+        "command": "gitOutgoingView.updateLastPush",
+        "title": "Update Last Push",
+        "category": "Git Outgoing View"
+      },
+      {
+        "command": "gitOutgoingView.itemClick",
+        "title": "Item Click"
       }
     ]
   },

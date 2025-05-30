@@ -1,6 +1,8 @@
 import * as vscode from 'vscode';
 import { exec } from 'child_process';
 import { promisify } from 'util';
+import * as path from 'path';
+import * as fs from 'fs';
 
 const execAsync = promisify(exec);
 
@@ -8,9 +10,13 @@ class GitOutgoingItem extends vscode.TreeItem {
     constructor(
         public readonly label: string,
         public readonly collapsibleState: vscode.TreeItemCollapsibleState,
-        public readonly command?: vscode.Command
+        public readonly itemType?: string,
+        public readonly file?: string,
+        public readonly status?: string,
+        public readonly hash?: string
     ) {
         super(label, collapsibleState);
+        this.contextValue = itemType;
     }
 }
 
@@ -149,11 +155,10 @@ class GitOutgoingProvider implements vscode.TreeDataProvider<GitOutgoingItem> {
                 return new GitOutgoingItem(
                     `${message} (${hash})`,
                     vscode.TreeItemCollapsibleState.None,
-                    {
-                        command: 'gitOutgoingView.showCommitDiff',
-                        title: 'Show Commit Diff',
-                        arguments: [hash]
-                    }
+                    'commit',
+                    undefined,
+                    undefined,
+                    hash
                 );
             });
         } catch (error: any) {
@@ -192,36 +197,62 @@ class GitOutgoingProvider implements vscode.TreeDataProvider<GitOutgoingItem> {
             const lastPushHash = this.pushStateTracker.getLastPushHash();
             console.log('Last push hash:', lastPushHash);
 
-            // Get all files changed in all outgoing commits
-            const command = lastPushHash 
-                ? `git diff --name-status ${lastPushHash}..${currentBranch}`
-                : `git diff --name-status origin/${currentBranch}..${currentBranch}`;
+            // Get files changed only in outgoing commits (not all changes since origin)
+            // First get the outgoing commits, then get files changed in those commits
+            const commitsCommand = lastPushHash 
+                ? `git log ${lastPushHash}..${currentBranch} --pretty=format:"%H"`
+                : `git log origin/${currentBranch}..${currentBranch} --pretty=format:"%H"`;
 
-            console.log('Executing command:', command);
-            const { stdout } = await execAsync(command, { cwd: this.workspaceRoot });
-            console.log('Command output:', stdout);
+            console.log('Getting outgoing commits:', commitsCommand);
+            const { stdout: commitsOutput } = await execAsync(commitsCommand, { cwd: this.workspaceRoot });
             
-            if (!stdout.trim()) {
+            if (!commitsOutput.trim()) {
+                return [new GitOutgoingItem('No outgoing commits', vscode.TreeItemCollapsibleState.None)];
+            }
+
+            const commitHashes = commitsOutput.split('\n').filter(line => line.trim());
+            console.log('Found outgoing commits:', commitHashes);
+
+            // Get all files changed in these outgoing commits
+            const filesSet = new Set<string>();
+            const filesStatus = new Map<string, string>();
+
+            for (const commitHash of commitHashes) {
+                const { stdout: filesOutput } = await execAsync(
+                    `git show --name-status --pretty=format: ${commitHash}`,
+                    { cwd: this.workspaceRoot }
+                );
+                
+                const lines = filesOutput.split('\n').filter(line => line.trim());
+                for (const line of lines) {
+                    const [status, file] = line.split('\t');
+                    if (file) {
+                        filesSet.add(file);
+                        // Keep the most recent status for each file
+                        if (!filesStatus.has(file)) {
+                            filesStatus.set(file, status);
+                        }
+                    }
+                }
+            }
+
+            if (filesSet.size === 0) {
                 return [new GitOutgoingItem('No changes in outgoing commits', vscode.TreeItemCollapsibleState.None)];
             }
 
-            const files = stdout.split('\n')
-                .filter(line => line.trim())
-                .map(line => {
-                    const [status, file] = line.split('\t');
-                    return { status, file };
-                });
+            const files = Array.from(filesSet).map(file => ({
+                file,
+                status: filesStatus.get(file) || 'M'
+            }));
 
             return files.map(({ status, file }) => {
                 const statusIcon = this.getStatusIcon(status);
                 return new GitOutgoingItem(
                     `${statusIcon} ${file}`,
                     vscode.TreeItemCollapsibleState.None,
-                    {
-                        command: 'gitOutgoingView.showFileDiff',
-                        title: 'Show File Diff',
-                        arguments: [file, status]
-                    }
+                    'file',
+                    file,
+                    status
                 );
             });
         } catch (error: any) {
@@ -257,11 +288,10 @@ class GitOutgoingProvider implements vscode.TreeDataProvider<GitOutgoingItem> {
                 return new GitOutgoingItem(
                     `${message} (${hash})`,
                     vscode.TreeItemCollapsibleState.None,
-                    {
-                        command: 'gitOutgoingView.showCommitDiff',
-                        title: 'Show Commit Diff',
-                        arguments: [hash]
-                    }
+                    'commit',
+                    undefined,
+                    undefined,
+                    hash
                 );
             });
         } catch (error) {
@@ -301,11 +331,9 @@ class GitOutgoingProvider implements vscode.TreeDataProvider<GitOutgoingItem> {
                 return new GitOutgoingItem(
                     `${statusIcon} ${file}`,
                     vscode.TreeItemCollapsibleState.None,
-                    {
-                        command: 'gitOutgoingView.showFileDiff',
-                        title: 'Show File Diff',
-                        arguments: [file, status]
-                    }
+                    'file',
+                    file,
+                    status
                 );
             });
         } catch (error) {
@@ -341,6 +369,67 @@ class GitOutgoingProvider implements vscode.TreeDataProvider<GitOutgoingItem> {
     }
 }
 
+class GitContentProvider implements vscode.TextDocumentContentProvider {
+    constructor(private workspaceRoot: string | undefined) {}
+
+    async provideTextDocumentContent(uri: vscode.Uri): Promise<string> {
+        console.log('Providing content for URI:', uri.toString());
+        
+        if (!this.workspaceRoot) {
+            return 'No workspace root available';
+        }
+        
+        const query = new URLSearchParams(uri.query);
+        const ref = query.get('ref');
+        const filePath = uri.path;
+        const isNewFile = query.get('new') === 'true';
+        
+        if (isNewFile) {
+            try {
+                // For new files, read from working directory
+                const fullPath = path.join(this.workspaceRoot, filePath);
+                const content = await fs.promises.readFile(fullPath, 'utf8');
+                return content;
+            } catch (error) {
+                console.error('Error reading new file:', error);
+                return `Error reading file: ${error}`;
+            }
+        }
+        
+        if (!ref) {
+            throw new Error('No git reference provided');
+        }
+        
+        try {
+            // First check if the ref exists
+            await execAsync(`git rev-parse --verify ${ref}`, { cwd: this.workspaceRoot });
+            
+            // Try to get the file content
+            const { stdout } = await execAsync(`git show ${ref}:"${filePath}"`, { cwd: this.workspaceRoot });
+            return stdout;
+        } catch (error: any) {
+            console.error('Error getting git content:', error);
+            
+            // Handle specific git errors
+            if (error.message && error.message.includes('does not exist')) {
+                return `File "${filePath}" does not exist at commit ${ref}`;
+            } else if (error.message && error.message.includes('bad revision')) {
+                return `Invalid git reference: ${ref}`;
+            } else if (error.message && error.message.includes('Path')) {
+                return `File "${filePath}" not found at commit ${ref}`;
+            }
+            
+            return `Error loading file content from git: ${error.message || error}`;
+        }
+    }
+}
+
+class EmptyContentProvider implements vscode.TextDocumentContentProvider {
+    provideTextDocumentContent(uri: vscode.Uri): string {
+        return '';
+    }
+}
+
 export function activate(context: vscode.ExtensionContext) {
     console.log('Git Helper extension is now active');
     
@@ -350,8 +439,33 @@ export function activate(context: vscode.ExtensionContext) {
     const gitOutgoingProvider = new GitOutgoingProvider(workspaceRoot);
 
     const treeView = vscode.window.createTreeView('gitOutgoingView', {
-        treeDataProvider: gitOutgoingProvider
+        treeDataProvider: gitOutgoingProvider,
+        showCollapseAll: true
     });
+
+    // Register EmptyContentProvider for empty diffs
+    const emptyContentProvider = new EmptyContentProvider();
+    context.subscriptions.push(
+        vscode.workspace.registerTextDocumentContentProvider('empty-diff', emptyContentProvider)
+    );
+
+    // Handle tree item selection
+    context.subscriptions.push(
+        treeView.onDidChangeSelection(async (e) => {
+            if (e.selection.length > 0) {
+                const item = e.selection[0];
+                console.log('Tree item selected:', item);
+                
+                if (item.itemType === 'file' && item.file && item.status) {
+                    // Handle file selection
+                    await showFileDiff(item.file, item.status, workspaceRoot, gitOutgoingProvider);
+                } else if (item.itemType === 'commit' && item.hash) {
+                    // Handle commit selection
+                    await showCommitDiff(item.hash, workspaceRoot, gitOutgoingProvider);
+                }
+            }
+        })
+    );
 
     context.subscriptions.push(
         vscode.commands.registerCommand('gitOutgoingView.refresh', () => {
@@ -360,156 +474,12 @@ export function activate(context: vscode.ExtensionContext) {
         })
     );
 
+    // Add a test command to verify command registration
     context.subscriptions.push(
-        vscode.commands.registerCommand('gitOutgoingView.showCommitDiff', async (hash: string) => {
-            console.log('Showing commit diff:', hash);
-            try {
-                if (!workspaceRoot) {
-                    vscode.window.showErrorMessage('No workspace root found');
-                    return;
-                }
-
-                // Get the commit message
-                const { stdout: commitMessage } = await execAsync(`git log -1 --pretty=format:%s ${hash}`, { cwd: workspaceRoot });
-                
-                // Get the list of changed files in this specific commit
-                const { stdout: changedFiles } = await execAsync(`git show --name-status --pretty=format: ${hash}`, { cwd: workspaceRoot });
-                const files = changedFiles.split('\n')
-                    .filter(line => line.trim())
-                    .map(line => {
-                        const [status, file] = line.split('\t');
-                        return { status, file };
-                    })
-                    .filter(({ file }) => file);
-
-                if (files.length === 0) {
-                    vscode.window.showInformationMessage('No files changed in this commit');
-                    return;
-                }
-
-                const fileItems = files.map(({ status, file }) => ({
-                    label: `${gitOutgoingProvider.getStatusIcon(status)} ${file}`,
-                    description: status,
-                    file: file,
-                    status: status
-                }));
-
-                const selectedFile = await vscode.window.showQuickPick(fileItems, {
-                    placeHolder: `Select a file to view changes (${hash})`,
-                    matchOnDescription: true
-                });
-
-                if (!selectedFile) {
-                    return;
-                }
-
-                // Create temporary files for the diff
-                const tempDir = vscode.Uri.file(workspaceRoot).with({ scheme: 'git-outgoing' });
-                const leftUri = tempDir.with({ path: `/${hash}^/${selectedFile.file}` });
-                const rightUri = tempDir.with({ path: `/${hash}/${selectedFile.file}` });
-
-                try {
-                    // Get the file content before and after the commit
-                    const { stdout: leftContent } = await execAsync(
-                        `git show ${hash}^:${selectedFile.file}`,
-                        { cwd: workspaceRoot }
-                    );
-                    contentProvider.setContent(leftUri, leftContent);
-                } catch (error) {
-                    // If file didn't exist before the commit, set empty content
-                    contentProvider.setContent(leftUri, '');
-                }
-
-                try {
-                    const { stdout: rightContent } = await execAsync(
-                        `git show ${hash}:${selectedFile.file}`,
-                        { cwd: workspaceRoot }
-                    );
-                    contentProvider.setContent(rightUri, rightContent);
-                } catch (error) {
-                    // If file doesn't exist after the commit, set empty content
-                    contentProvider.setContent(rightUri, '');
-                }
-
-                // Create a diff editor
-                await vscode.commands.executeCommand('vscode.diff', leftUri, rightUri, `${selectedFile.file} (${hash})`);
-
-            } catch (error) {
-                console.error('Error showing commit diff:', error);
-                vscode.window.showErrorMessage(`Failed to show commit diff: ${error}`);
-            }
+        vscode.commands.registerCommand('gitOutgoingView.test', () => {
+            console.log('Test command executed');
+            vscode.window.showInformationMessage('Test command works!');
         })
-    );
-
-    context.subscriptions.push(
-        vscode.commands.registerCommand('gitOutgoingView.showFileDiff', async (file: string, status: string) => {
-            try {
-                if (!workspaceRoot) {
-                    vscode.window.showErrorMessage('No workspace root found');
-                    return;
-                }
-
-                const currentBranch = await gitOutgoingProvider.getCurrentBranch();
-                
-                // Create temporary files for the diff
-                const tempDir = vscode.Uri.file(workspaceRoot).with({ scheme: 'git-outgoing' });
-                const leftUri = tempDir.with({ path: `/origin/${currentBranch}/${file}` });
-                const rightUri = tempDir.with({ path: `/${currentBranch}/${file}` });
-
-                try {
-                    // Get the file content from origin
-                    const { stdout: leftContent } = await execAsync(
-                        `git show origin/${currentBranch}:${file}`,
-                        { cwd: workspaceRoot }
-                    );
-                    contentProvider.setContent(leftUri, leftContent);
-                } catch (error) {
-                    // If file doesn't exist in origin (new file), set empty content
-                    contentProvider.setContent(leftUri, '');
-                }
-
-                try {
-                    // Get the file content from current branch
-                    const { stdout: rightContent } = await execAsync(
-                        `git show ${currentBranch}:${file}`,
-                        { cwd: workspaceRoot }
-                    );
-                    contentProvider.setContent(rightUri, rightContent);
-                } catch (error) {
-                    // If file doesn't exist in current branch (deleted file), set empty content
-                    contentProvider.setContent(rightUri, '');
-                }
-
-                // Create a diff editor
-                await vscode.commands.executeCommand('vscode.diff', leftUri, rightUri, `${file} (${currentBranch})`);
-
-            } catch (error) {
-                console.error(`Error showing diff for file ${file}:`, error);
-                vscode.window.showErrorMessage(`Failed to show diff for ${file}: ${error}`);
-            }
-        })
-    );
-
-    // Register content provider for temporary files
-    const contentProvider = new class implements vscode.TextDocumentContentProvider {
-        private contentMap = new Map<string, string>();
-
-        async provideTextDocumentContent(uri: vscode.Uri): Promise<string> {
-            const content = this.contentMap.get(uri.toString());
-            return content || '';
-        }
-
-        setContent(uri: vscode.Uri, content: string) {
-            this.contentMap.set(uri.toString(), content);
-        }
-
-        clearContent(uri: vscode.Uri) {
-            this.contentMap.delete(uri.toString());
-        }
-    };
-
-    context.subscriptions.push(
-        vscode.workspace.registerTextDocumentContentProvider('git-outgoing', contentProvider)
     );
 
     // Refresh when active editor changes
@@ -560,8 +530,298 @@ export function activate(context: vscode.ExtensionContext) {
             await gitOutgoingProvider.updateLastPush();
         })
     );
+
+    // Register Git content provider
+    const gitContentProvider = new GitContentProvider(workspaceRoot);
+    context.subscriptions.push(
+        vscode.workspace.registerTextDocumentContentProvider('git-base', gitContentProvider)
+    );
 }
 
 export function deactivate() {
     console.log('Git Helper extension is now deactivated');
+}
+
+// Helper functions
+async function showFileDiff(file: string, status: string, workspaceRoot: string | undefined, gitOutgoingProvider: GitOutgoingProvider) {
+    console.log('Showing file diff:', file, status);
+    
+    try {
+        if (!workspaceRoot) {
+            vscode.window.showErrorMessage('No workspace root found');
+            return;
+        }
+
+        // Get current branch
+        const { stdout: currentBranch } = await execAsync('git rev-parse --abbrev-ref HEAD', { cwd: workspaceRoot });
+        const branch = currentBranch.trim();
+        console.log('Current branch:', branch);
+
+        // Get the base commit for comparison (either last push or origin)
+        let baseCommit = '';
+        try {
+            // Try to get the merge base with origin
+            const { stdout: mergeBase } = await execAsync(`git merge-base origin/${branch} ${branch}`, { cwd: workspaceRoot });
+            baseCommit = mergeBase.trim();
+            console.log('Base commit:', baseCommit);
+        } catch (error) {
+            console.error('Error getting merge base:', error);
+            vscode.window.showErrorMessage('Error determining base commit for diff');
+            return;
+        }
+
+        // Create URIs for the diff
+        const emptyUri = vscode.Uri.parse('empty-diff:empty');
+        const baseFileUri = vscode.Uri.parse(`git-base:${file}?ref=${baseCommit}`);
+        const currentFileUri = vscode.Uri.file(path.join(workspaceRoot, file));
+        
+        // Handle different file statuses
+        if (status === 'D') {
+            // Deleted file - show base vs empty
+            console.log('Showing deleted file diff');
+            await vscode.commands.executeCommand('vscode.diff', 
+                baseFileUri, 
+                emptyUri, 
+                `${file} (Deleted in outgoing commits)`
+            );
+        } else if (status === 'A') {
+            // Added file - show empty vs current
+            console.log('Handling added file:', file);
+            
+            // For new files, use direct file URI and empty-diff URI
+            console.log('Using file URI:', currentFileUri.toString());
+            
+            try {
+                // First check if file exists
+                await fs.promises.access(path.join(workspaceRoot, file));
+                
+                // Show diff with empty file
+                await vscode.commands.executeCommand('vscode.diff', 
+                    emptyUri, 
+                    currentFileUri, 
+                    `${file} (Added in outgoing commits)`
+                );
+            } catch (error) {
+                console.error('Error accessing file:', error);
+                vscode.window.showErrorMessage(`Failed to show file diff: ${error}`);
+            }
+        } else {
+            // Modified file - show base vs current
+            console.log('Showing modified file diff');
+            
+            // Check if file exists in working directory
+            try {
+                await fs.promises.access(path.join(workspaceRoot, file));
+                await vscode.commands.executeCommand('vscode.diff', 
+                    baseFileUri, 
+                    currentFileUri, 
+                    `${file} (Modified in outgoing commits)`
+                );
+            } catch (accessError) {
+                // File doesn't exist in working directory, compare with HEAD
+                const headFileUri = vscode.Uri.parse(`git-base:${file}?ref=HEAD`);
+                await vscode.commands.executeCommand('vscode.diff', 
+                    baseFileUri, 
+                    headFileUri, 
+                    `${file} (Modified in outgoing commits)`
+                );
+            }
+        }
+
+    } catch (error) {
+        console.error(`Error showing file ${file}:`, error);
+        vscode.window.showErrorMessage(`Failed to show file diff ${file}: ${error}`);
+    }
+}
+
+async function showCommitDiff(hash: string, workspaceRoot: string | undefined, gitOutgoingProvider: GitOutgoingProvider) {
+    console.log('Showing commit diff:', hash);
+    
+    try {
+        if (!workspaceRoot) {
+            vscode.window.showErrorMessage('No workspace root found');
+            return;
+        }
+
+        // Get commit info
+        const { stdout: commitInfo } = await execAsync(
+            `git show --pretty=format:"%h %an %ad %s" --date=short ${hash}`,
+            { cwd: workspaceRoot }
+        );
+        
+        const commitHeader = commitInfo.split('\n')[0];
+
+        // Get the diff with context
+        const { stdout: diffOutput } = await execAsync(
+            `git show --color=never --unified=3 ${hash}`,
+            { cwd: workspaceRoot }
+        );
+
+        console.log('Got diff output, creating webview');
+        
+        // Create and show webview panel
+        const panel = vscode.window.createWebviewPanel(
+            'gitCommitDiff',
+            `Commit ${hash.substring(0, 7)}`,
+            vscode.ViewColumn.One,
+            {
+                enableScripts: true,
+                retainContextWhenHidden: true
+            }
+        );
+
+        panel.webview.html = createDiffHtml(diffOutput, commitHeader, hash);
+
+    } catch (error) {
+        console.error('Error showing commit diff:', error);
+        vscode.window.showErrorMessage(`Failed to show commit diff: ${error}`);
+    }
+}
+
+function createDiffHtml(diffOutput: string, commitHeader: string, hash: string): string {
+    // Parse and format the diff
+    const lines = diffOutput.split('\n');
+    let formattedDiff = '';
+    let currentFile = '';
+    
+    for (const line of lines) {
+        if (line.startsWith('commit ') || line.startsWith('Author: ') || line.startsWith('Date: ')) {
+            // Skip git show header lines
+            continue;
+        }
+        
+        if (line.startsWith('diff --git')) {
+            const match = line.match(/diff --git a\/(.*) b\/(.*)/);
+            if (match) {
+                currentFile = match[1];
+                formattedDiff += `<div class="file-header">📄 ${currentFile}</div>\n`;
+            }
+            continue;
+        }
+        
+        if (line.startsWith('index ') || line.startsWith('---') || line.startsWith('+++')) {
+            // Skip git metadata lines
+            continue;
+        }
+        
+        if (line.startsWith('@@')) {
+            // Hunk header
+            formattedDiff += `<div class="hunk-header">🔍 ${line}</div>\n`;
+            continue;
+        }
+        
+        // Format diff lines
+        let cssClass = 'context';
+        let icon = '';
+        
+        if (line.startsWith('+')) {
+            cssClass = 'addition';
+            icon = '➕ ';
+        } else if (line.startsWith('-')) {
+            cssClass = 'deletion';
+            icon = '➖ ';
+        } else if (line.startsWith(' ')) {
+            cssClass = 'context';
+            icon = '   ';
+        }
+        
+        const escapedLine = line
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;')
+            .replace(/"/g, '&quot;')
+            .replace(/'/g, '&#39;');
+        
+        formattedDiff += `<div class="diff-line ${cssClass}">${icon}${escapedLine}</div>\n`;
+    }
+
+    return `
+        <!DOCTYPE html>
+        <html lang="en">
+        <head>
+            <meta charset="UTF-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1.0">
+            <title>Commit Diff</title>
+            <style>
+                body {
+                    font-family: 'Consolas', 'Monaco', 'Courier New', monospace;
+                    font-size: 13px;
+                    line-height: 1.4;
+                    margin: 0;
+                    padding: 20px;
+                    background-color: var(--vscode-editor-background);
+                    color: var(--vscode-editor-foreground);
+                }
+                
+                .commit-header {
+                    background-color: var(--vscode-textBlockQuote-background);
+                    border-left: 4px solid var(--vscode-textBlockQuote-border);
+                    padding: 15px;
+                    margin-bottom: 20px;
+                    border-radius: 4px;
+                    font-weight: bold;
+                }
+                
+                .file-header {
+                    background-color: var(--vscode-textCodeBlock-background);
+                    padding: 8px 12px;
+                    margin: 15px 0 5px 0;
+                    border-radius: 4px;
+                    font-weight: bold;
+                    color: var(--vscode-textLink-foreground);
+                    border-left: 3px solid var(--vscode-textLink-foreground);
+                }
+                
+                .hunk-header {
+                    background-color: var(--vscode-diffEditor-unchangedCodeBackground);
+                    color: var(--vscode-diffEditor-unchangedTextForeground);
+                    padding: 4px 8px;
+                    margin: 8px 0 2px 0;
+                    border-radius: 3px;
+                    font-weight: bold;
+                    font-size: 11px;
+                }
+                
+                .diff-line {
+                    padding: 1px 8px;
+                    white-space: pre;
+                    word-wrap: break-word;
+                    border-left: 3px solid transparent;
+                }
+                
+                .diff-line.addition {
+                    background-color: var(--vscode-diffEditor-insertedTextBackground);
+                    color: var(--vscode-diffEditor-insertedTextForeground);
+                    border-left-color: #28a745;
+                }
+                
+                .diff-line.deletion {
+                    background-color: var(--vscode-diffEditor-removedTextBackground);
+                    color: var(--vscode-diffEditor-removedTextForeground);
+                    border-left-color: #dc3545;
+                }
+                
+                .diff-line.context {
+                    background-color: transparent;
+                    color: var(--vscode-editor-foreground);
+                }
+                
+                .diff-container {
+                    border: 1px solid var(--vscode-panel-border);
+                    border-radius: 6px;
+                    overflow: hidden;
+                }
+            </style>
+        </head>
+        <body>
+            <div class="commit-header">
+                🔄 ${commitHeader}
+            </div>
+            
+            <div class="diff-container">
+                ${formattedDiff}
+            </div>
+        </body>
+        </html>
+    `;
 } 
